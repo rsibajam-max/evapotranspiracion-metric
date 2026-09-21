@@ -106,7 +106,7 @@ Para agregar otra estación, se debe modificar la función `ws()` en `waterUtils
 
 7. **Enmascaramiento de nubes**
    - El paquete `water` incluye un módulo de nubes, pero no funciona bien con Landsat 8 reciente.
-   - El pipeline usa un parche propio basado en el archivo BQA (ver `02-parche-nubes`).
+   - El pipeline usa un parche propio basado en el archivo BQA.
    - Se aplica después del balance, para no afectar los cálculos con NA.
 
 8. **Escritura de resultados**
@@ -124,7 +124,7 @@ Incluye todas las variables calculadas por el balance de energía, sin eliminar 
 
 ### 2. Salida sin nubes
 
-Los rasters del BQA (banda de calidad de Landsat) se copian primero a una carpeta temporal. Luego se aplica el parche de enmascaramiento (ver `02-parche-nubes`), que reclasifica el BQA y multiplica por cada raster. El resultado se escribe a la carpeta final sin nubes.
+Los rasters del BQA (banda de calidad de Landsat) se copian primero a una carpeta temporal. Luego se aplica el parche de enmascaramiento, que reclasifica el BQA y multiplica por cada raster. El resultado se escribe a la carpeta final sin nubes.
 
 **Carpetas que se manejan:**
 
@@ -144,6 +144,60 @@ El flujo fue automatizado para que, al procesar cada imagen:
 5. Se limpien las carpetas temporales para la siguiente corrida.
 
 Este manejo de archivos llevó bastante trabajo implementarlo, porque requería coordinar las rutas entre las distintas etapas del pipeline (cálculo, recorte, enmascaramiento, escritura final) y entre las dos estaciones.
+
+## Enmascaramiento de nubes
+
+El paquete `water` incluye un módulo de detección de nubes, pero **no funciona bien con las imágenes Landsat 8 recientes**:
+
+- El formato del archivo BQA cambió en versiones nuevas.
+- El módulo original fue escrito para una versión anterior del algoritmo.
+- El resultado es inconsistente y difícil de verificar.
+
+El pipeline usa un **parche propio** que:
+
+1. Reclasifica el raster BQA según la tabla `reclassify.csv`.
+2. Multiplica el BQA reclasificado por cada raster (ET, Ts, NDVI, etc.).
+3. Los píxeles con nube quedan con **valor 0** en lugar de NA.
+
+### Decisión de diseño: 0 en lugar de NA
+
+Cuando un píxel de nube se multiplica por 0, queda en 0. Eso es distinto de NA.
+
+- **NA**: el píxel no influye en cálculos estadísticos (medias, sumas, agregaciones). Es la forma estándar de decir "no dato".
+- **0**: el píxel sí influye en cálculos, como si fuera un valor real de ET = 0.
+
+La decisión de usar 0 en lugar de NA fue deliberada:
+
+- El **BQA reclasificado** usa NA para los píxeles con nube. Eso es lo correcto: cuando se analiza el BQA solo, esos píxeles quedan marcados como "no dato" y no ensucian estadísticas de calidad.
+- La **salida final sin nubes** usa 0 para esos mismos píxeles, porque el flujo posterior requería rasters sin NA (para poder combinarlos, sumarlos o promediarlos sin errores).
+
+Quien use los rasters finales debe saber que **0 = nube enmascarada**, no "cero real de ET".
+
+### La tabla de reclasificación
+
+El `reclassify.csv` no es una copia de las recomendaciones de USGS. Es una tabla de reclasificación propia, calibrada para las condiciones específicas de la zona de estudio.
+
+**Contexto de la decisión:**
+
+El distrito de riego donde se aplica este pipeline tiene **alta presencia de nubes**, especialmente durante la época lluviosa. Aplicar un criterio estricto de eliminación (eliminar también nubes de "confianza media" o cirrus tenues) resultaría en:
+
+- Una fracción muy pequeña de píxeles válidos por imagen.
+- Pérdida de imágenes completas por falta de cobertura.
+- Series temporales incompletas, inservibles para análisis de ET.
+
+**La decisión fue conservar los píxeles con confianza media o baja de nube, y eliminar únicamente los píxeles con alta confianza de nube, cirrus o sombra de nube.**
+
+El trade-off aceptado es: puede quedar algún píxel con nube tenue, pero se preserva la cobertura espacial y temporal del estudio.
+
+**Estructura de la tabla:**
+
+- `is` — valor original del BQA (combinación de bits).
+- `becomes` — valor reclasificado: `0`, `1` o `NA`.
+  - `0` — píxel sin dato (fill).
+  - `1` — píxel válido (sin nube, o con confianza baja/media).
+  - `NA` — píxel con nube, cirrus o sombra (alta confianza).
+
+Los valores del BQA son combinaciones de bits que describen múltiples condiciones simultáneamente. La tabla de USGS documenta qué significa cada combinación, pero la decisión de qué eliminar y qué conservar es del profesional.
 
 ## Opciones de configuración
 
@@ -173,15 +227,16 @@ El paquete `water` ofrece múltiples métodos para cada sub-modelo del balance d
 
 - `waterMod.R` — flujo principal del pipeline.
 - `waterUtilsMod.R` — funciones auxiliares (descompresión, renombrado, estaciones, escritura de rasters).
+- `reclassify.csv` — tabla de reclasificación del BQA para enmascaramiento de nubes.
 
 ## Cómo correrlo
 
 1. Ajustar la ruta de trabajo en `waterMod.R` (`setwd()`).
 2. Colocar en el directorio de trabajo:
    - El archivo `.tar.gz` de Landsat 8 (descargado de ESPA).
-   - El DEM (ASTER.tif).
+   - El DEM (`ASTER.tif`).
    - El CSV de la estación meteorológica.
-   - El archivo MTL.txt (viene dentro del `.tar.gz`).
+   - El archivo `MTL.txt` (viene dentro del `.tar.gz`).
 3. Ajustar la variable `estacion` a `"EstacionA"` o `"EstacionB"`.
 4. Ejecutar `waterMod.R`.
 5. Los rasters resultantes se escriben en las carpetas de salida configuradas.
@@ -194,7 +249,14 @@ Este pipeline fue desarrollado para estimar evapotranspiración real a escala de
 
 ## Créditos
 
-El pipeline usa el paquete `water` para R, desarrollado por Guillermo Federico Olmedo, Samuel Ortega-Farías, David Fonseca-Luengo, Daniel de la Fuente-Saiz y Fernando Fuentes-Paille.
+El pipeline usa el paquete `water` para R, desarrollado por Guillermo Federico Olmedo, Samuel Ortega-Farías, David Fonseca-Luengo, Daniel de la Fuente-Saiz y Fernando Fuentes-Peñailillo.
 
 - Repositorio: https://github.com/midraed/water
 - Artículo: Olmedo, G. F., Ortega-Farías, S., Fonseca-Luengo, D., de la Fuente-Saiz, D., & Fuentes-Peñailillo, F. (2016). *water: Tools and Functions to Estimate Actual Evapotranspiration Using Land Surface Energy Balance Models in R*. The R Journal, 8(2), 382-391.
+
+## Créditos de la tabla BQA
+
+Los valores del BQA utilizados en la tabla de reclasificación provienen de la documentación oficial de USGS para Landsat 8:
+
+- USGS Landsat Quality Assessment (QA) Tools User Guide.
+- https://www.usgs.gov/landsat-missions/landsat-collection-2-quality-assessment-bands
